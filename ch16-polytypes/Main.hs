@@ -1,5 +1,9 @@
-{-# LANGUAGE UnicodeSyntax #-}
+{-# LANGUAGE TemplateHaskell, UnicodeSyntax #-}
 module Main where
+
+import Test.Hspec
+import Test.QuickCheck
+import Test.QuickCheck.All
 
 type Id = String
 type FieldName = Id
@@ -12,6 +16,10 @@ data Ty =
   | Poly [TyVar] Ty
   deriving (Show, Eq)
 
+-- We represent all types as applications
+-- of type constructors (even built-in types).
+-- For example, the type 'Int' is represented as
+-- App (TyCon Int [])
 data TyCon =
     Int
   | String
@@ -19,7 +27,7 @@ data TyCon =
   | Arrow
   | Array
   | Record [FieldName]
-  | TyFun [TyVar] Ty
+  | TyFun [TyVar] Ty      -- A user-defined polymorphic type constructor
   | Unique TyCon
   deriving (Show, Eq)
 
@@ -36,15 +44,18 @@ subst var@(Var α) ((β, t):bts) =
   else subst var bts
 
 subst Nil _ = Nil
+subst (App (TyFun tyVars ty) tys) env = Var "wrong"
 
 
-main :: IO ()
-main = do
-  print $ subst (Var "foo") mtEnv
-  print $ subst (Var "bar") mtEnv
-  print $ subst (Var "T") [("T", App Int [])]
+substSpecs = do
+  describe "subst" $ do
+    it "substitutes types for type vars" $ do
+      subst (Var "foo") mtEnv `shouldBe` Var "foo"
+      subst (Var "T") [("T", App Int [])] `shouldBe` App Int []
 
-  -- type pair<A, B> = { fst : A, snd : B }
-  -- need an App here, not a TyCon
-  print $ subst (TyFun ["A", "B"] (App (Record ["fst", "snd"]) [Var("A"), Var("B")]))
-  print $ subst Nil mtEnv
+-- prop_len xs = len xs == len $ reverse xs
+
+return [] -- need this for GHC 7.8
+-- quickCheckAll generates test cases for all 'prop_*' properties
+-- main = $(quickCheckAll)
+main = hspec substSpecs
