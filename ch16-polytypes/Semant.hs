@@ -1,23 +1,22 @@
 module Semant where
 
 import Test.Hspec
-import qualified Syntax
+import Syntax
 import Types
 
-type AlphaId = (Int, Syntax.Id)
 type Env = [(Syntax.Id, Types.Ty)]
 
 mtEnv :: Env
 mtEnv = []
 
-subst :: Ty -> Env -> Ty
+subst :: Types.Ty -> Env -> Types.Ty
 subst (TyVar alpha) [] = TyVar alpha
 subst var@(TyVar alpha) ((beta, t):betas) =
   if beta == alpha then t
   else subst var betas
 
 subst TyNil _ = TyNil
-subst (TyApp (TyFun tyVars ty) tys) env = TyVar "wrong"
+subst (TyApp (TyFun tyVars ty) tys) env = TyVar $ mkId "wrong"
 
 
 substSpecs = do
@@ -26,12 +25,12 @@ substSpecs = do
       subst TyNil mtEnv `shouldBe` TyNil
 
     it "subs types for type vars" $ do
-      subst (TyVar "foo") mtEnv `shouldBe` TyVar "foo"
-      subst (TyVar "T") [("T", TyApp Int [])] `shouldBe` TyApp Int []
+      subst (TyVar (mkId "foo")) mtEnv `shouldBe` TyVar (mkId "foo")
+      subst (TyVar (mkId "T")) [((mkId "T"), TyApp Int [])] `shouldBe` TyApp Int []
 
     it "subs polymorphic record types" $ do
-      subst (TyApp (TyFun ["T", "K"] (TyApp (Record ["fst", "snd"]) [TyVar "T", TyVar "K"]))
+      subst (TyApp (TyFun [mkId "T", mkId "K"] (TyApp (Record [mkId "fst", mkId "snd"]) [TyVar (mkId "T"), TyVar (mkId "K")]))
               [TyApp Int [], TyApp String []])
             mtEnv
         `shouldBe`
-        (TyApp (Record ["fst", "snd"]) [TyApp Int [], TyApp String []])
+        (TyApp (Record [mkId "fst", mkId "snd"]) [TyApp Int [], TyApp String []])

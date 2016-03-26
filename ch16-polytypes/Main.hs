@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell, UnicodeSyntax #-}
+{-# LANGUAGE TemplateHaskell #-}
 module Main where
 
 import Test.Hspec
@@ -14,4 +14,6 @@ import qualified Types
 return [] -- need this for GHC 7.8
 -- quickCheckAll generates test cases for all 'prop_*' properties
 -- main = $(quickCheckAll)
-main = hspec Semant.substSpecs
+main = hspec $ do
+  Syntax.specs
+  Semant.substSpecs
