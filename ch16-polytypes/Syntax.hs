@@ -27,6 +27,7 @@ data Exp =
   | Let [Dec] Exp                           -- LET dec ... IN exp
   | Num Int
   | Ref Id
+  | Add Exp Exp
   deriving (Eq, Show)
 
 data Dec =
@@ -44,9 +45,9 @@ type CanFail a = Either FailMessage a
 
 
 -- Alpha conversion
--- We rewrite the syntax tree such that each binding
+-- We avoid variable capture by rewriting the syntax tree such that each binding
 -- occurrence introduces a new, unique identifier and
--- substitute each bound occurrence refers back to the
+-- substituting each bound occurrence such that it refers back to the
 -- new one.
 -- We also get the nice side effect that we can detect
 -- any free identifiers and return an error.
@@ -75,10 +76,17 @@ lookupAlpha (AlphaEnv _ table) (UserId sym) =
   in
     case result of
       Nothing -> Left $ printf "Unbound identifier '%s'" sym
-      Just id -> Right $ snd id
+      Just id -> return $ snd id
 
 lookupAlpha _ id = return id
 
+
+_alphaConvertIds :: AlphaEnv -> [Id] -> CanFail ([Id], AlphaEnv)
+_alphaConvertIds env [] = return ([], env)
+_alphaConvertIds env (id:ids) = do
+  (id', env') <- return $ fresh id env
+  (ids', env'') <- _alphaConvertIds env' ids
+  return (id':ids', env'')
 
 _alphaConvertDecs :: AlphaEnv -> [Dec] -> CanFail ([Dec], AlphaEnv)
 _alphaConvertDecs env [] = return ([], env)
@@ -87,37 +95,64 @@ _alphaConvertDecs env (d:decs) = do
   (decs', env'') <- _alphaConvertDecs env' decs
   return (d':decs', env'')
 
+_alphaConvertTyFields :: AlphaEnv -> [TyField] -> CanFail ([TyField], AlphaEnv)
+_alphaConvertTyFields env [] = return ([], env)
+_alphaConvertTyFields env ((id, ty):tyfs) = do
+  (id', env') <- return $ fresh id env
+  ty' <- _alphaConvertTy env' ty
+  (tyfs', env'') <- _alphaConvertTyFields env' tyfs
+  return ((id', ty'):tyfs', env'')
 
-_alphaConvertTy :: AlphaEnv -> Ty -> CanFail (Ty, AlphaEnv)
+
+_alphaConvertTy :: AlphaEnv -> Ty -> CanFail Ty
 _alphaConvertTy env (TypeIdTy id) = do
   id' <- lookupAlpha env id
-  return (TypeIdTy id', env)
+  return $ TypeIdTy id'
 
 
 _alphaConvertDec :: AlphaEnv -> Dec -> CanFail (Dec, AlphaEnv)
 _alphaConvertDec env (VarDec id ty e) = do
   let (id', env') = fresh id env
-  (ty', _) <- _alphaConvertTy env ty
-  (e', _) <- _alphaConvert env e
+  ty' <- _alphaConvertTy env ty
+  e' <- _alphaConvert env e
   return (VarDec id' ty' e', env')
 
+_alphaConvertDec env (FunDec funId tyVars tyFields retTyId body) = do
+  (funId', env') <- return $ fresh funId env
+  (tyVars', env'') <- _alphaConvertIds env' tyVars
+  (tyFields', env''') <- _alphaConvertTyFields env'' tyFields
+  retTyId' <- lookupAlpha env''' retTyId
+  body' <- _alphaConvert env''' body
+  return (FunDec funId' tyVars' tyFields' retTyId' body', env')
 
-_alphaConvert :: AlphaEnv -> Exp -> CanFail (Exp, AlphaEnv)
+
+_alphaConvert :: AlphaEnv -> Exp -> CanFail Exp
 _alphaConvert env (Ref id) = do
   id' <- lookupAlpha env id
-  return (Ref id', env)
+  return $ Ref id'
 
 _alphaConvert env (Let decs e) = do
   (decs', env') <- _alphaConvertDecs env decs
-  (e', _) <- _alphaConvert env' e
-  return (Let decs' e', env)
+  e' <- _alphaConvert env' e
+  return $ Let decs' e'
+
+_alphaConvert env (Add lhs rhs) = do
+  lhs' <- _alphaConvert env lhs
+  rhs' <- _alphaConvert env rhs
+  return $ Add lhs' rhs'
+
+_alphaConvert env (App funE tyArgs argEs) = do
+  funE' <- _alphaConvert env funE
+  tyArgs' <- mapM (_alphaConvertTy env) tyArgs
+  argEs' <- mapM (_alphaConvert env) argEs
+  return $ App funE' tyArgs' argEs'
 
 -- TODO: Still need cases for App, Rec
-_alphaConvert env id = return (id, env)
+_alphaConvert env e = return e
 
 
 alphaConvert :: Exp -> CanFail Exp
-alphaConvert e = do { liftM fst $ _alphaConvert mkAlphaEnv e }
+alphaConvert e = _alphaConvert mkAlphaEnv e
 
 
 specs = do
@@ -127,14 +162,10 @@ specs = do
       let env@(AlphaEnv initCounter initTable) = mkAlphaEnv
           (id1, env') = fresh (UserId "bar") env
           (id2, env'') = fresh (UserId "bar") env'
-          (id3, env''') = fresh (UserId "foo") env''
+          id3 = fst $ fresh (UserId "foo") env''
       id1 `shouldBe` UniqId 3 "bar"
       id2 `shouldBe` UniqId 4 "bar"
       id3 `shouldBe` UniqId 5 "foo"
-
-      env' `shouldBe` AlphaEnv 2 ([("bar", UniqId 1 "bar")] ++ initTable)
-      env'' `shouldBe` AlphaEnv 3 [("bar", UniqId 2 "bar"), ("bar", UniqId 1 "bar")]
-      env''' `shouldBe` AlphaEnv 4 [("foo", UniqId 3 "foo"), ("bar", UniqId 2 "bar"), ("bar", UniqId 1 "bar")]
 
   describe "alphaConvert" $ do
     it "replaces let bindings and occurrences with unique id's" $ do
@@ -144,3 +175,63 @@ specs = do
         (Right
           (Let [VarDec (UniqId 3 "foo") (TypeIdTy (UniqId 1 "int")) (Num 4)]
             (Num 3)))
+
+    it "returns an error for free identifiers" $ do
+      alphaConvert (Ref (mkId "foo")) `shouldBe` Left "Unbound identifier 'foo'"
+
+    it "replaces refs with uniq-id pointers" $ do
+      alphaConvert
+        (Let [VarDec (mkId "foo") (TypeIdTy (mkId "int")) (Num 4)] (Ref (mkId "foo")))
+        `shouldBe`
+        (Right
+          (Let [VarDec (UniqId 3 "foo") (TypeIdTy (UniqId 1 "int")) (Num 4)]
+            (Ref (UniqId 3 "foo"))))
+
+    it "preserves lexical scoping" $ do
+      alphaConvert
+        (Let [VarDec (mkId "foo") (TypeIdTy (mkId "int")) (Num 4),
+              VarDec (mkId "foo") (TypeIdTy (mkId "int")) (Num 5)]
+          (Ref (mkId "foo")))
+        `shouldBe`
+        (Right
+          (Let [VarDec (UniqId 3 "foo") (TypeIdTy (UniqId 1 "int")) (Num 4),
+                VarDec (UniqId 4 "foo") (TypeIdTy (UniqId 1 "int")) (Num 5)]
+            (Ref (UniqId 4 "foo"))))
+
+    it "preserves lexical scoping in nested lets" $ do
+      alphaConvert
+        (Let [VarDec (mkId "foo") (TypeIdTy (mkId "int")) (Num 4)]
+          (Let [VarDec (mkId "foo") (TypeIdTy (mkId "int")) (Num 5)]
+            (Ref (mkId "foo"))))
+        `shouldBe`
+        (Right
+          (Let [VarDec (UniqId 3 "foo") (TypeIdTy (UniqId 1 "int")) (Num 4)]
+            (Let [VarDec (UniqId 4 "foo") (TypeIdTy (UniqId 1 "int")) (Num 5)]
+              (Ref (UniqId 4 "foo")))))
+
+    it "rewrites bound occurrences for id's in enclosing scopes" $ do
+      alphaConvert
+        (Let [VarDec (mkId "foo") (TypeIdTy (mkId "int")) (Num 4)]
+          (Let [VarDec (mkId "bar") (TypeIdTy (mkId "int")) (Num 5)]
+            (Add (Ref (mkId "foo")) (Ref (mkId "bar")))))
+        `shouldBe`
+        (Right
+          (Let [VarDec (UniqId 3 "foo") (TypeIdTy (UniqId 1 "int")) (Num 4)]
+            (Let [VarDec (UniqId 4 "bar") (TypeIdTy (UniqId 1 "int")) (Num 5)]
+              (Add (Ref (UniqId 3 "foo")) (Ref (UniqId 4 "bar"))))))
+
+    it "rewrites polymorphic fun defs" $ do
+      alphaConvert
+        (Let [FunDec (mkId "identity") [mkId "T"]
+                     [(mkId "x", TypeIdTy (mkId "T"))]
+                     (mkId "T")
+                     (Ref (mkId "x"))]
+          (App (Ref (mkId "identity")) [TypeIdTy (mkId "int")] [Num 42]))
+        `shouldBe`
+        (Right
+          (Let [FunDec (UniqId 3 "identity") [UniqId 4 "T"]
+                       [(UniqId 5 "x", TypeIdTy (UniqId 4 "T"))]
+                       (UniqId 4 "T")
+                       (Ref (UniqId 5 "x"))]
+            (App (Ref (UniqId 3 "identity")) [TypeIdTy (UniqId 1 "int")] [Num 42])))
+
