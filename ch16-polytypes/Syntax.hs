@@ -300,9 +300,6 @@ specs = do
     --     var ls : list<int> = list<int>{ hd = 42, tl = nil }
     -- in
     --   ls
-    -- TODO: this needs to be fixed, the type declaration
-    -- should be a poly<T>
-    -- RecTyDec should probably go away altogether
     it "rewrites record instantiations" $ do
       runAlphaConvert
         (Let [(RecTyDec "list" ["T"]
