@@ -3,7 +3,7 @@ module Syntax where
 import Control.Monad
 import Data.Foldable
 import Test.Hspec
-import Text.Printf
+import Text.Printf (printf)
 
 data Id = UserId String | UniqId Int String
   deriving (Eq, Show)
@@ -109,6 +109,10 @@ _alphaConvertTy env (TypeIdTy id) = do
   id' <- lookupAlpha env id
   return $ TypeIdTy id'
 
+_alphaConvertTy env (PolyTy tyVars ty) = do
+  (tyVars', env') <- _alphaConvertIds env tyVars
+  ty' <- _alphaConvertTy env' ty
+  return $ PolyTy tyVars' ty'
 
 _alphaConvertDec :: AlphaEnv -> Dec -> CanFail (Dec, AlphaEnv)
 _alphaConvertDec env (VarDec id ty e) = do
@@ -234,4 +238,18 @@ specs = do
                        (UniqId 4 "T")
                        (Ref (UniqId 5 "x"))]
             (App (Ref (UniqId 3 "identity")) [TypeIdTy (UniqId 1 "int")] [Num 42])))
+
+    it "rewrites polymorphic record decs" $ do
+      alphaConvert
+        (Let [RecTyDec (mkId "list") [mkId "T"]
+                       [(mkId "hd", TypeIdTy (mkId "T")),
+                        (mkId "tl", TyConTy (TypeIdTy (mkId "list")) [TypeIdTy (mkId "T")])]]
+          (Num 42))
+        `shouldBe`
+        (Right
+          (Let [RecTyDec (UniqId 3 "list")
+                         [UniqId 4 "T"]
+                         [(UniqId 5 "hd", TypeIdTy (UniqId 4 "T")),
+                          (UniqId 6 "tl", TyConTy (TypeIdTy (UniqId 3 "list")) [TypeIdTy (UniqId 4 "T")])]]
+            (Num 42)))
 
