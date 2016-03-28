@@ -30,6 +30,7 @@ data Exp =
   | Num Int
   | Ref Id
   | Add Exp Exp
+  | Nil
   deriving (Eq, Show)
 
 data Dec =
@@ -60,6 +61,15 @@ type AlphaConverted a = ExceptT FailMessage (State AlphaEnv) a
 mkAlphaEnv :: AlphaEnv
 mkAlphaEnv =
   AlphaEnv 3 [("int", UniqId 1 "int"), ("string", UniqId 2 "string")]
+
+
+pushEnv :: AlphaConverted AlphaEnv
+pushEnv = lift get
+
+popEnv :: AlphaEnv -> AlphaConverted ()
+popEnv (AlphaEnv _ table) = do
+  (AlphaEnv counter' _) <- lift get
+  put $ AlphaEnv counter' table
 
 
 fresh :: Id -> AlphaConverted Id
@@ -94,10 +104,21 @@ _alphaConvertTy (TypeIdTy id) = do
   id' <- lookupAlpha id
   return $ TypeIdTy id'
 
+_alphaConvertTy (FunTy argTys retTy) = do
+  argTys' <- mapM _alphaConvertTy argTys
+  retTy' <- _alphaConvertTy retTy
+  return $ FunTy argTys' retTy'
+
+_alphaConvertTy (TyConTy ty tyArgs) = do
+  ty' <- _alphaConvertTy ty
+  tyArgs' <- mapM _alphaConvertTy tyArgs
+  return $ TyConTy ty' tyArgs'
+
 _alphaConvertTy (PolyTy tyVars ty) = do
   tyVars' <- mapM fresh tyVars
   ty' <- _alphaConvertTy ty
   return $ PolyTy tyVars' ty'
+
 
 _alphaConvertDec :: Dec -> AlphaConverted Dec
 _alphaConvertDec (VarDec id ty e) = do
@@ -114,6 +135,14 @@ _alphaConvertDec (FunDec funId tyVars tyFields retTyId body) = do
   body' <- _alphaConvert body
   return (FunDec funId' tyVars' tyFields' retTyId' body')
 
+_alphaConvertDec (RecTyDec id tyVars tyFields) = do
+  id' <- fresh id
+  env <- pushEnv
+  tyVars' <- mapM fresh tyVars
+  tyFields' <- mapM (\(fid, fty) -> do { fty' <- _alphaConvertTy fty; return (fid, fty') }) tyFields
+  popEnv env
+  return $ RecTyDec id' tyVars' tyFields'
+
 
 _alphaConvert :: Exp -> AlphaConverted Exp
 _alphaConvert (Ref id) = do
@@ -121,8 +150,10 @@ _alphaConvert (Ref id) = do
   return $ Ref id'
 
 _alphaConvert (Let decs e) = do
+  env <- pushEnv
   decs' <- mapM _alphaConvertDec decs
   e' <- _alphaConvert e
+  popEnv env
   return $ Let decs' e'
 
 _alphaConvert (Add lhs rhs) = do
@@ -136,8 +167,14 @@ _alphaConvert (App funE tyArgs argEs) = do
   argEs' <- mapM _alphaConvert argEs
   return $ App funE' tyArgs' argEs'
 
--- TODO: Still need cases for Rec
-_alphaConvert e = return e
+_alphaConvert (Rec id tyArgs fields) = do
+  id' <- lookupAlpha id
+  tyArgs' <- mapM _alphaConvertTy tyArgs
+  fields' <- mapM (\(fid, e) -> do { e' <- _alphaConvert e; return (fid, e) }) fields
+  return $ Rec id' tyArgs' fields'
+
+_alphaConvert (Num x) = return $ Num x
+_alphaConvert Nil = return Nil
 
 
 alphaConvert :: Exp -> Either FailMessage Exp
@@ -145,17 +182,6 @@ alphaConvert e = evalState (runExceptT $ _alphaConvert e) mkAlphaEnv
 
 
 specs = do
-  -- describe "fresh" $ do
-  --   it "bumps the counter and gives back a 'unique' id" $ do
-  --     fresh (UniqId 42 "foo") mkAlphaEnv `shouldBe` (UniqId 42 "foo", mkAlphaEnv)
-  --     let env@(AlphaEnv initCounter initTable) = mkAlphaEnv
-  --         (id1, env') = fresh (UserId "bar") env
-  --         (id2, env'') = fresh (UserId "bar") env'
-  --         id3 = fst $ fresh (UserId "foo") env''
-  --     id1 `shouldBe` UniqId 3 "bar"
-  --     id2 `shouldBe` UniqId 4 "bar"
-  --     id3 `shouldBe` UniqId 5 "foo"
-
   describe "alphaConvert" $ do
     it "replaces let bindings and occurrences with unique id's" $ do
       alphaConvert
@@ -198,6 +224,40 @@ specs = do
             (Let [VarDec (UniqId 4 "foo") (TypeIdTy (UniqId 1 "int")) (Num 5)]
               (Ref (UniqId 4 "foo")))))
 
+    -- let type foo<T> = { x : T }
+    --     var T : int = 42
+    -- in
+    --   ref T
+    it "preserves lexical scoping for ty vars" $ do
+      alphaConvert
+        (Let [RecTyDec (mkId "foo") [mkId "T"] [(mkId "x", TypeIdTy (mkId "T"))],
+              VarDec (mkId "T") (TypeIdTy (mkId "int")) (Num 42)]
+          (Ref (mkId "T")))
+        `shouldBe`
+        (Right
+          (Let [RecTyDec (UniqId 3 "foo") [UniqId 4 "T"] [(mkId "x", TypeIdTy (UniqId 4 "T"))],
+                VarDec (UniqId 5 "T") (TypeIdTy (UniqId 1 "int")) (Num 42)]
+            (Ref (UniqId 5 "T"))))
+
+    -- let type foo<T> = { x : T }
+    -- in
+    --   ref T
+    it "does not preserve local ty vars in outer scopes" $ do
+      alphaConvert
+        (Let [RecTyDec (mkId "foo") [mkId "T"] [(mkId "x", TypeIdTy (mkId "T"))]]
+          (Ref (mkId "T")))
+        `shouldBe`
+        (Left "Unbound identifier 'T'")
+
+    it "does not preserve bindings from nested lets in outer scopes" $ do
+      alphaConvert
+        (Let [VarDec (mkId "foo")
+                     (TypeIdTy (mkId "int"))
+                     (Let [VarDec (mkId "bar") (TypeIdTy (mkId "int")) (Num 43)] (Ref (mkId "bar")))]
+          (Ref (mkId "bar")))
+        `shouldBe`
+        (Left "Unbound identifier 'bar'")
+
     it "rewrites bound occurrences for id's in enclosing scopes" $ do
       alphaConvert
         (Let [VarDec (mkId "foo") (TypeIdTy (mkId "int")) (Num 4)]
@@ -224,7 +284,7 @@ specs = do
                        (Ref (UniqId 5 "x"))]
             (App (Ref (UniqId 3 "identity")) [TypeIdTy (UniqId 1 "int")] [Num 42])))
 
-    it "rewrites polymorphic record decs" $ do
+    it "does not alpha-convert record field identifiers" $ do
       alphaConvert
         (Let [RecTyDec (mkId "list") [mkId "T"]
                        [(mkId "hd", TypeIdTy (mkId "T")),
@@ -234,7 +294,32 @@ specs = do
         (Right
           (Let [RecTyDec (UniqId 3 "list")
                          [UniqId 4 "T"]
-                         [(UniqId 5 "hd", TypeIdTy (UniqId 4 "T")),
-                          (UniqId 6 "tl", TyConTy (TypeIdTy (UniqId 3 "list")) [TypeIdTy (UniqId 4 "T")])]]
+                         [(mkId "hd", TypeIdTy (UniqId 4 "T")),
+                          (mkId "tl", TyConTy (TypeIdTy (UniqId 3 "list")) [TypeIdTy (UniqId 4 "T")])]]
             (Num 42)))
 
+    -- let type list<T> = { hd : T, tl : list<T> }
+    --     var ls : list<int> = list<int>{ hd = 42, tl = nil }
+    -- in
+    --   ls
+    -- TODO: this needs to be fixed, the type declaration
+    -- should be a poly<T>
+    -- RecTyDec should probably go away altogether
+    it "rewrites record instantiations" $ do
+      alphaConvert
+        (Let [(RecTyDec (mkId "list") [mkId "T"]
+                       [(mkId "hd", TypeIdTy (mkId "T")),
+                        (mkId "tl", TyConTy (TypeIdTy (mkId "list")) [TypeIdTy (mkId "T")])]),
+              (VarDec (mkId "ls")
+                      (TyConTy (TypeIdTy (mkId "list")) [TypeIdTy (mkId "int")])
+                      (Rec (mkId "list") [TypeIdTy (mkId "int")] [(mkId "hd", Num 42), (mkId "tl", Nil)]))]
+          (Ref (mkId "ls")))
+        `shouldBe`
+        (Right
+          (Let [(RecTyDec (UniqId 3 "list") [UniqId 4 "T"]
+                         [(mkId "hd", TypeIdTy (UniqId 4 "T")),
+                          (mkId "tl", TyConTy (TypeIdTy (UniqId 3 "list")) [TypeIdTy (UniqId 4 "T")])]),
+                (VarDec (UniqId 5 "ls")
+                        (TyConTy (TypeIdTy (UniqId 3 "list")) [TypeIdTy (UniqId 1 "int")])
+                        (Rec (UniqId 3 "list") [TypeIdTy (UniqId 1 "int")] [(mkId "hd", Num 42), (mkId "tl", Nil)]))]
+            (Ref (UniqId 5 "ls"))))
