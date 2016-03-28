@@ -16,8 +16,8 @@ data Ty =
   | TyName Syntax.Id Ty
 -- Polymorphic
   | TyApp TyCon [Ty]
-  | TyVar Syntax.TyVar
-  | TyPoly [Syntax.TyVar] Ty
+  | TyVar (Syntax.TyVar Syntax.Id)
+  | TyPoly [Syntax.TyVar Syntax.Id] Ty
   deriving (Show, Eq)
 
 -- We represent all types as applications
@@ -31,6 +31,6 @@ data TyCon =
   | Arrow
   | Array
   | Record [FieldName]
-  | TyFun [Syntax.TyVar] Ty      -- A user-defined polymorphic type constructor
+  | TyFun [Syntax.TyVar Syntax.Id] Ty      -- A user-defined polymorphic type constructor
   | Unique TyCon
   deriving (Show, Eq)
